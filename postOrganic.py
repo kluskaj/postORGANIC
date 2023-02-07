@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import ReadOIFITS as oi
 import numpy as np
 import scipy as sc
+import os
 
 
 class Data:
@@ -76,11 +77,12 @@ class Data:
 
 
 class cube:
-    def __init__(self, dir, file = 'ImageCube.fits', nPCA=3, nKmeans=3):
+    def __init__(self, dir, file = 'Cube.fits', nPCA=3, nKmeans=3, nbest=6):
         self.dir = dir
         self.file = file
         self.nKmeans = nKmeans
         self.nPCA = nPCA
+        self.nbest = nbest
         self.read()
         self.doPCA()
         self.doKmeans()
@@ -89,20 +91,29 @@ class cube:
         self.plotImages()
 
     def read(self):
-        hdul = fits.open(self.dir + self.file)
+        path = os.path.join(self.dir, self.file)
+        hdul = fits.open(path)
         cube = hdul[0].data
         self.hdr = hdul[0].header
         self.ps = hdul[0].header['CDELT2']
         self.n = hdul[0].header['NAXIS2']
         try:
-            self.x2 = hdul[0].header['X']
-            self.y2 = hdul[0].header['Y']
-            self.fs = hdul[0].header['UDF']
-            self.f2 = hdul[0].header['PF']
-            self.UD = hdul[0].header['UDD']
-            self.denv = hdul[0].header['DENV']
-            self.dsec = hdul[0].header['DSEC']
+            self.x2 = hdul[0].header['SDEX2']
+            self.y2 = hdul[0].header['SDEY2']
+            self.fs = hdul[0].header['SFLU1']
+            self.f2 = hdul[0].header['SFLU2']
+            self.UD = hdul[0].header['SUD1']
+            self.denv = hdul[0].header['SIND0']
+            self.dsec = hdul[0].header['SIND2']
             self.cube = cube
+            # self.x2 = hdul[0].header['X']
+            # self.y2 = hdul[0].header['Y']
+            # self.fs = hdul[0].header['UDF']
+            # self.f2 = hdul[0].header['PF']
+            # self.UD = hdul[0].header['UDD']
+            # self.denv = hdul[0].header['DENV']
+            # self.dsec = hdul[0].header['DSEC']
+            # self.cube = cube
         except:
             self.x2 = hdul[0].header['XBVAL']
             self.y2 = hdul[0].header['YBVAL']
@@ -111,7 +122,14 @@ class cube:
             self.UD = hdul[0].header['UDVAL']
             self.denv = hdul[0].header['DEVAL']
             self.dsec = hdul[0].header['DBVAL']
-            self.cube = cube[:,:,::-1]
+            self.cube = cube
+
+        # Read the metrics associated to each image.
+        metrics = hdul[1].data
+        self.fdata = metrics['fdata']
+        self.ftot = metrics['ftot']
+        self.frgl = metrics['fdiscriminator']
+
 
         self.set_coord()
 
@@ -130,6 +148,92 @@ class cube:
         centers = kmeans.cluster_centers_
         self.kmeans = clusters
         self.centers = centers
+        kmeansmetrics = self.giveKmeansmetrics()
+
+
+    def giveBest(self):
+        fdata = self.fdata
+        ftot = self.ftot
+        frgl = self.frgl
+        cube = self.cube
+        nbest = self.nbest
+
+        idx = ftot.argsort()
+
+        zebest, zemetrics = [], []
+        for i in np.arange(nbest):
+            id = np.where(idx == i)[0]
+            zebest.extend(cube[id, :, :])
+            zemetrics.append(np.array([ftot[id][0], fdata[id][0], frgl[id][0]]))
+
+        self.bestimages = np.array(zebest)
+        self.bestmetrics = np.array(zemetrics)
+
+        self.plotBest()
+        self.writeBest()
+
+    def writeBest(self):
+        best = self.bestimages
+        metrics = self.bestmetrics
+        ftot, fdata, frgl = metrics[:,0], metrics[:,1], metrics[:,2]
+        nbest = self.nbest
+        for i in np.arange(self.nbest):
+            hdr = self.hdr
+            hdr['NBEST'] = i+1
+            hdr['CDELT1'] = hdr['CDELT1']
+            hdr['FTOT'] = ftot[i]
+            hdr['FDATA'] = fdata[i]
+            hdr['FRGL'] = frgl[i]
+            img = best[i,::-1,:]
+            hdu = fits.PrimaryHDU(img, header = hdr)
+            hdul = fits.HDUList([hdu])
+            hdul.writeto(os.path.join(self.dir, f'Images_Best{i+1}.fits'), overwrite=True)
+
+
+    def plotBest(self):
+        best = self.bestimages
+        metrics = self.bestmetrics
+        ftot, fdata, frgl = metrics[:,0], metrics[:,1], metrics[:,2]
+        nbest = self.nbest
+        ncols = int(np.sqrt(nbest))
+        nrows = int(np.sqrt(nbest))
+        if nrows*ncols != nbest:
+            ncols += 1
+        indices = np.indices((nrows, ncols))
+        indrow = indices[0].ravel()
+        indcols = indices[1].ravel()
+        fig, axs = plt.subplots(ncols=ncols, nrows=nrows, sharey=True, sharex=True)
+        d = self.d
+        for i in np.arange(nbest):
+            ax = axs[indrow[i], indcols[i]]
+            image = np.array(best[i,::-1,:])
+            ax.imshow(image, extent = (d, -d, -d, d),  cmap='inferno')
+            ax.set_xlim(d, -d)
+            ax.text(0.8*d, 0.8*d, f"chi2={fdata[i]:2.2f}", color='white', size=9)
+            ax.set_title(f"Best model {i+1}")
+            if indcols[i] == 0:
+                ax.set_xlabel('$\Delta\alpha$ (mas)')
+            if indrow[i] == indrow[-1]:
+                ax.set_ylabel('$\Delta\delta$ (mas)')
+        plt.tight_layout
+        plt.savefig(os.path.join(self.dir,f'Image_best{nbest}.pdf'))
+        plt.show()
+        plt.close()
+
+    def giveKmeansmetrics(self):
+        clusters = self.kmeans
+        nk = self.nKmeans
+        fdata = self.fdata
+        frgl = self.frgl
+
+        fdatacluster, frglcluster = [], []
+        for i in np.arange(nk):
+            fdatak = fdata[clusters==i]
+            frglk = frgl[clusters==i]
+            fdatacluster.append(np.median(fdatak))
+            frglcluster.append(np.median(frglk))
+        self.kmeanfdata = fdatacluster
+        self.keamnfrgl = frglcluster
 
     def plotKmeans(self):
         fig, ax = plt.subplots()
@@ -140,7 +244,18 @@ class cube:
         plt.ylabel('PCA2')
         plt.xlabel('PCA1')
         plt.tight_layout
-        plt.savefig(self.dir+'PCAsets.pdf')
+        plt.savefig(os.path.join(self.dir,'PCAsets.pdf'))
+        plt.show()
+        plt.close()
+
+        fig, ax = plt.subplots()
+        plt.scatter(self.fdata, self.frgl, c=self.kmeans)
+        for fd, fr, k in zip(self.kmeanfdata, self.keamnfrgl, np.arange(self.nKmeans)):
+            plt.text(fd, fr, s=f"{k}", size='large', backgroundcolor='lightgray', alpha=0.6)
+        plt.ylabel('frgl')
+        plt.xlabel('fdata')
+        plt.tight_layout
+        plt.savefig(os.path.join(self.dir,'PCAmetrics.pdf'))
         plt.show()
         plt.close()
 
@@ -176,14 +291,14 @@ class cube:
         fig, axs = plt.subplots(ncols=self.nKmeans, sharey=True)
         d = self.d
         for ax,i in zip(axs,np.arange(self.nKmeans)):
-            ax.imshow(images[i,::-1,::-1], extent = (d, -d, -d, d),  cmap='inferno')
+            ax.imshow(images[i,::-1,:], extent = (d, -d, -d, d),  cmap='inferno')
             ax.set_xlim(d, -d)
             #ax.text(20, 20, f"{i}: {self.counts[i]} images", color='white', size=7)
             ax.set_title(f"{i}: {self.counts[i]} images")
             ax.set_xlabel('$\Delta\alpha$ (mas)')
             ax.set_ylabel('$\Delta\delta$ (mas)')
         plt.tight_layout
-        plt.savefig(self.dir+'Image_sets.pdf')
+        plt.savefig(os.path.join(self.dir,'Image_sets.pdf'))
         plt.show()
         plt.close()
 
@@ -194,11 +309,11 @@ class cube:
         for i in np.arange(len(self.counts)):
             hdr = self.hdr
             hdr['SET'] = i
-            hdr['CDELT1'] = -1 * hdr['CDELT1']
-            img = images[i,:,::-1]
+            hdr['CDELT1'] = hdr['CDELT1']
+            img = images[i,:,:]
             hdu = fits.PrimaryHDU(img, header = hdr)
             hdul = fits.HDUList([hdu])
-            hdul.writeto(self.dir + f'Images_set{i}.fits', overwrite=True)
+            hdul.writeto(os.path.join(self.dir, f'Images_set{i}.fits'), overwrite=True)
 
     @staticmethod
     def add_Gaussian(image, x, y, f):
@@ -336,7 +451,7 @@ class cube:
             for ax in axy:
                 i += 1
                 if i < number-1:
-                    ax.imshow(images[i,::-1,::-1], cmap='inferno')
+                    ax.imshow(images[i,::-1,:], cmap='inferno')
         plt.tight_layout
         plt.show()
         plt.close()
@@ -420,11 +535,12 @@ class cube:
         plt.close()
 
 def main():
-    dirdata = '/Users/jacques/Work/Targets/BC2022/data/'
+    dirdata = '/Users/jacques/Work/Organic/diagnostics/ImageRec_mu=0.1/'
     file = 'c_imaging_contest2.fits'
 
     arg = sys.argv[1:]
     Cube0 = cube(arg[0], nPCA = 10, nKmeans=3)
+    Cube0.giveBest()
     #Cube0.getChi2(dirdata, file)
     Cube0.writeImages(add_stars=False)
     #Cube0.radial_profiles(R=100)
